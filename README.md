@@ -60,4 +60,12 @@ curl http://localhost:11434/api/generate -d '{
 ```
 
 
+# Note
+```
+ollama stop gemma3:12b
+ollama ls
+ollama ps
+OLLAMA_ORIGINS="*" ollama serve
+```
+
 
