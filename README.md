@@ -10,6 +10,9 @@ docker run -d -v ollama:/root/.ollama -p 11434:11434 --name ollama ollama/ollama
 docker exec -it <container_id> bash
 ```
 
+## Note
+It creates a named volume `ollama` and mounts it to `/root/. ollama` inside the container.
+
 ## run with model inside docker
 * How to run
 ```
