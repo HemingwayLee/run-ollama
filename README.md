@@ -7,6 +7,7 @@ docker pull ollama/ollama:0.13.3
 ## how to run
 ```
 docker run -d -v ollama:/root/.ollama -p 11434:11434 --name ollama ollama/ollama:0.13.3
+docker run -d -v ollama:/root/.ollama -p 11434:11434 -e OLLAMA_ORIGINS="*" --name ollama ollama/ollama:0.13.3
 docker exec -it <container_id> bash
 ```
 
