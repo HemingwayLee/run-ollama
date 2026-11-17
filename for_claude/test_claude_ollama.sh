@@ -23,6 +23,9 @@ OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
 CONTAINER="${CONTAINER:-ollama-claude}"
 PHOTO_PATH="${PHOTO_PATH:-$(dirname "$0")/../photo1.png}"
 TIMEOUT="${TIMEOUT:-300}"
+# Thinking models (e.g. gemma4) spend hundreds of tokens reasoning before the
+# text block; a small budget ends in stop_reason=max_tokens with no text.
+MAX_TOKENS="${MAX_TOKENS:-2048}"
 
 PASS=0; FAIL=0
 pass() { echo "  PASS: $1"; PASS=$((PASS+1)); }
@@ -39,6 +42,15 @@ post() { # post <path> <json-file> -> body on stdout
     -H 'x-api-key: ollama' \
     -H 'anthropic-version: 2023-06-01' \
     -d @"$2"
+}
+
+why() { # explain an empty-text response
+  local sr; sr=$(echo "$1" | jq -r '.stop_reason // empty' 2>/dev/null)
+  if [ "$sr" = "max_tokens" ]; then
+    echo "hit max_tokens=$MAX_TOKENS before any text (thinking used the budget; raise MAX_TOKENS)"
+  else
+    echo "$2: $(echo "$1" | head -c 300)"
+  fi
 }
 
 echo "== Ollama: $OLLAMA_HOST   model: $MODEL"
@@ -72,31 +84,31 @@ TEXT=$(echo "$OUT" | jq -r '.response // empty')
 [ -n "$TEXT" ] && pass "response: $(echo "$TEXT" | head -c 80)" || fail "no response: $(echo "$OUT" | head -c 300)"
 
 echo "[4] /v1/messages (Anthropic API)"
-jq -n --arg m "$MODEL" '{model:$m, max_tokens:256,
+jq -n --arg m "$MODEL" --argjson n "$MAX_TOKENS" '{model:$m, max_tokens:$n,
   messages:[{role:"user", content:"Reply with the single word: pong"}]}' > "$TMPDIR_T/msg.json"
 OUT=$(post /v1/messages "$TMPDIR_T/msg.json")
 TEXT=$(echo "$OUT" | jq -r '[.content[]? | select(.type=="text") | .text] | join("")')
-[ -n "$TEXT" ] && pass "response: $(echo "$TEXT" | head -c 80)" || fail "bad response: $(echo "$OUT" | head -c 300)"
+[ -n "$TEXT" ] && pass "response: $(echo "$TEXT" | head -c 80)" || fail "$(why "$OUT" "bad response")"
 
 echo "[5] /v1/messages with tool use"
-jq -n --arg m "$MODEL" '{model:$m, max_tokens:512,
+jq -n --arg m "$MODEL" --argjson n "$MAX_TOKENS" '{model:$m, max_tokens:$n,
   tools:[{name:"get_weather", description:"Get the current weather for a city",
           input_schema:{type:"object", properties:{city:{type:"string"}}, required:["city"]}}],
   messages:[{role:"user", content:"What is the weather in Seoul? Use the tool."}]}' > "$TMPDIR_T/tool.json"
 OUT=$(post /v1/messages "$TMPDIR_T/tool.json")
 TOOL=$(echo "$OUT" | jq -c '.content[]? | select(.type=="tool_use") | {name, input}' | head -1)
-[ -n "$TOOL" ] && pass "tool_use: $TOOL" || fail "no tool_use block (model may not support tools): $(echo "$OUT" | head -c 300)"
+[ -n "$TOOL" ] && pass "tool_use: $TOOL" || fail "$(why "$OUT" "no tool_use block (model may not support tools)")"
 
 echo "[6] /v1/messages with image"
 if [ -f "$PHOTO_PATH" ]; then
   base64 -i "$PHOTO_PATH" | tr -d '\n' > "$TMPDIR_T/img.b64"
-  jq -n --arg m "$MODEL" --rawfile img "$TMPDIR_T/img.b64" '{model:$m, max_tokens:256,
+  jq -n --arg m "$MODEL" --argjson n "$MAX_TOKENS" --rawfile img "$TMPDIR_T/img.b64" '{model:$m, max_tokens:$n,
     messages:[{role:"user", content:[
       {type:"image", source:{type:"base64", media_type:"image/png", data:$img}},
       {type:"text", text:"Describe this image in one sentence."}]}]}' > "$TMPDIR_T/img.json"
   OUT=$(post /v1/messages "$TMPDIR_T/img.json")
   TEXT=$(echo "$OUT" | jq -r '[.content[]? | select(.type=="text") | .text] | join("")')
-  [ -n "$TEXT" ] && pass "response: $(echo "$TEXT" | head -c 120)" || fail "bad response (model may not support vision): $(echo "$OUT" | head -c 300)"
+  [ -n "$TEXT" ] && pass "response: $(echo "$TEXT" | head -c 120)" || fail "$(why "$OUT" "bad response (model may not support vision)")"
 else
   echo "  skipped: $PHOTO_PATH not found"
 fi
@@ -117,9 +129,15 @@ else
         ANTHROPIC_DEFAULT_SONNET_MODEL="$MODEL" \
         ANTHROPIC_DEFAULT_HAIKU_MODEL="$MODEL" \
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
-        $TO claude -p --model "$MODEL" "Reply with the single word: pong" 2>&1)
+        $TO claude -p --model "$MODEL" "Reply with the single word: pong" 2>"$TMPDIR_T/claude.err")
   RC=$?
-  [ $RC -eq 0 ] && [ -n "$OUT" ] && pass "claude said: $(echo "$OUT" | head -c 120)" || fail "claude exit $RC: $(echo "$OUT" | head -c 300)"
+  # stderr carries harmless notices (e.g. "claude.ai connectors are disabled
+  # because ... auth source is set"), so judge only the model's stdout.
+  if [ $RC -eq 0 ] && echo "$OUT" | grep -qi pong; then
+    pass "claude said: $(echo "$OUT" | head -c 120)"
+  else
+    fail "claude exit $RC, stdout: $(echo "$OUT" | head -c 200) stderr: $(head -c 300 "$TMPDIR_T/claude.err")"
+  fi
 fi
 
 echo
